@@ -19,13 +19,17 @@ interface ParsedInspection {
   comments: { itemId: number; text: string }[];
 }
 
+// GET handler
 export async function GET(
   request: NextRequest,
-  { params }: { params: { location: string; room: string } }
+  { params }: { params: Promise<{ location: string; room: string }> }
 ) {
   try {
-    const locationId = parseInt(params.location);
-    const roomNumber = parseInt(params.room);
+    // Await the params promise
+    const { location, room } = await params;
+    const locationId = parseInt(location);
+    const roomNumber = parseInt(room);
+    
     const db = getDb();
 
     const inspections = db.prepare(`
@@ -88,6 +92,31 @@ export async function GET(
     console.error('Error fetching inspections:', error);
     return NextResponse.json(
       { success: false, error: 'Failed to fetch inspections' },
+      { status: 500 }
+    );
+  }
+}
+
+// You can also add POST, PUT, DELETE handlers if needed
+export async function POST(
+  request: NextRequest,
+  { params }: { params: Promise<{ location: string; room: string }> }
+) {
+  try {
+    const { location, room } = await params;
+    const locationId = parseInt(location);
+    const roomNumber = parseInt(room);
+    const body = await request.json();
+    
+    // Implementation for POST at specific location/room
+    return NextResponse.json({ 
+      success: true, 
+      message: `POST to location ${locationId}, room ${roomNumber}`,
+      data: body 
+    });
+  } catch (error) {
+    return NextResponse.json(
+      { success: false, error: 'Failed to process request' },
       { status: 500 }
     );
   }
