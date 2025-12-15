@@ -1,63 +1,77 @@
 import { NextRequest, NextResponse } from 'next/server';
-import db, { InspectionRow, InspectionWithRelations } from '../../lib/database';
+import { getDb } from '../../lib/database';
+
+// Define types for SQLite results
+interface InspectionDbResult {
+  id: number;
+  location_id: number;
+  room_number: number;
+  created_at: string;
+  ratings: string; // JSON string
+  comments: string; // JSON string
+}
+
+interface ParsedInspection {
+  id: number;
+  location_id: number;
+  room_number: number;
+  created_at: string;
+  ratings: { itemId: number; score: number }[];
+  comments: { itemId: number; text: string }[];
+}
 
 export async function GET(request: NextRequest) {
   try {
+    const db = getDb();
+    
     const inspections = db.prepare(`
       SELECT i.*, 
-        json_group_array(
-          json_object('itemId', r.item_id, 'score', r.score)
+        COALESCE(
+          json_group_array(
+            json_object('itemId', r.item_id, 'score', r.score)
+          ), '[]'
         ) as ratings,
-        json_group_array(
-          json_object('itemId', c.item_id, 'text', c.text)
+        COALESCE(
+          json_group_array(
+            json_object('itemId', c.item_id, 'text', c.text)
+          ), '[]'
         ) as comments
       FROM inspections i
       LEFT JOIN ratings r ON i.id = r.inspection_id
       LEFT JOIN comments c ON i.id = c.inspection_id
       GROUP BY i.id
       ORDER BY i.created_at DESC
-    `).all() as InspectionRow[];
+    `).all() as InspectionDbResult[];
 
-    // Properly type the parsed inspections
-    const parsedInspections: InspectionWithRelations[] = inspections.map((inspection: InspectionRow) => {
-      // Create a base object with the known properties
-      const baseInspection = {
+    const parsedInspections: ParsedInspection[] = inspections.map((inspection) => {
+      let ratings: { itemId: number; score: number }[] = [];
+      let comments: { itemId: number; text: string }[] = [];
+
+      try {
+        const parsedRatings = JSON.parse(inspection.ratings || '[]');
+        ratings = Array.isArray(parsedRatings) 
+          ? parsedRatings.filter((r: any) => r && r.itemId !== null && r.score !== null)
+          : [];
+      } catch (e) {
+        ratings = [];
+      }
+
+      try {
+        const parsedComments = JSON.parse(inspection.comments || '[]');
+        comments = Array.isArray(parsedComments)
+          ? parsedComments.filter((c: any) => c && c.itemId !== null && c.text !== null)
+          : [];
+      } catch (e) {
+        comments = [];
+      }
+
+      return {
         id: inspection.id,
         location_id: inspection.location_id,
         room_number: inspection.room_number,
         created_at: inspection.created_at,
-        updated_at: inspection.updated_at,
-      };
-
-      // Parse the JSON strings with proper error handling
-      let ratings: any[] = [];
-      let comments: any[] = [];
-
-      try {
-        ratings = JSON.parse(inspection.ratings);
-      } catch (e) {
-        console.error('Error parsing ratings:', e);
-      }
-
-      try {
-        comments = JSON.parse(inspection.comments);
-      } catch (e) {
-        console.error('Error parsing comments:', e);
-      }
-
-      // Filter out null values and ensure proper typing
-      const filteredRatings = ratings
-        .filter((r: any) => r && r.itemId !== null && r.score !== null)
-        .map((r: any) => ({ itemId: r.itemId, score: r.score }));
-
-      const filteredComments = comments
-        .filter((c: any) => c && c.itemId !== null && c.text !== null)
-        .map((c: any) => ({ itemId: c.itemId, text: c.text }));
-
-      return {
-        ...baseInspection,
-        ratings: filteredRatings,
-        comments: filteredComments,
+        ratings,
+        comments,
       };
     });
 
@@ -77,6 +91,7 @@ export async function GET(request: NextRequest) {
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
+    const db = getDb();
     
     if (!body.locationId || !body.roomNumber) {
       return NextResponse.json(
@@ -100,73 +115,79 @@ export async function POST(request: NextRequest) {
       VALUES (?, ?, ?)
     `);
 
-    const result = db.transaction(() => {
+    const inspectionId: number = db.transaction(() => {
       const inspectionResult = insertInspection.run(body.locationId, body.roomNumber);
-      const inspectionId = inspectionResult.lastInsertRowid as number;
+      const id = inspectionResult.lastInsertRowid as number;
       
-      body.ratings?.forEach((rating: any) => {
-        insertRating.run(inspectionId, rating.itemId, rating.score);
-      });
+      // Insert ratings if provided
+      if (body.ratings && Array.isArray(body.ratings)) {
+        body.ratings.forEach((rating: any) => {
+          insertRating.run(id, rating.itemId, rating.score);
+        });
+      }
       
-      body.comments?.forEach((comment: any) => {
-        insertComment.run(inspectionId, comment.itemId, comment.text);
-      });
+      // Insert comments if provided
+      if (body.comments && Array.isArray(body.comments)) {
+        body.comments.forEach((comment: any) => {
+          insertComment.run(id, comment.itemId, comment.text);
+        });
+      }
       
-      return inspectionId;
+      return id;
     })();
 
-    // Fetch the created inspection
+    // Get the created inspection with proper typing
     const newInspection = db.prepare(`
       SELECT i.*, 
-        json_group_array(
-          json_object('itemId', r.item_id, 'score', r.score)
+        COALESCE(
+          json_group_array(
+            json_object('itemId', r.item_id, 'score', r.score)
+          ), '[]'
         ) as ratings,
-        json_group_array(
-          json_object('itemId', c.item_id, 'text', c.text)
+        COALESCE(
+          json_group_array(
+            json_object('itemId', c.item_id, 'text', c.text)
+          ), '[]'
         ) as comments
       FROM inspections i
       LEFT JOIN ratings r ON i.id = r.inspection_id
       LEFT JOIN comments c ON i.id = c.inspection_id
       WHERE i.id = ?
       GROUP BY i.id
-    `).get(result) as InspectionRow;
+    `).get(inspectionId) as InspectionDbResult | undefined;
 
-    // Parse the new inspection with proper typing
-    const baseInspection = {
+    if (!newInspection) {
+      throw new Error('Failed to retrieve created inspection');
+    }
+
+    let ratings: { itemId: number; score: number }[] = [];
+    let comments: { itemId: number; text: string }[] = [];
+
+    try {
+      const parsedRatings = JSON.parse(newInspection.ratings || '[]');
+      ratings = Array.isArray(parsedRatings)
+        ? parsedRatings.filter((r: any) => r && r.itemId !== null && r.score !== null)
+        : [];
+    } catch (e) {
+      ratings = [];
+    }
+
+    try {
+      const parsedComments = JSON.parse(newInspection.comments || '[]');
+      comments = Array.isArray(parsedComments)
+        ? parsedComments.filter((c: any) => c && c.itemId !== null && c.text !== null)
+        : [];
+    } catch (e) {
+      comments = [];
+    }
+
+    const parsedInspection: ParsedInspection = {
       id: newInspection.id,
       location_id: newInspection.location_id,
       room_number: newInspection.room_number,
       created_at: newInspection.created_at,
-      updated_at: newInspection.updated_at,
-    };
-
-    let ratings: any[] = [];
-    let comments: any[] = [];
-
-    try {
-      ratings = JSON.parse(newInspection.ratings);
-    } catch (e) {
-      console.error('Error parsing ratings:', e);
-    }
-
-    try {
-      comments = JSON.parse(newInspection.comments);
-    } catch (e) {
-      console.error('Error parsing comments:', e);
-    }
-
-    const filteredRatings = ratings
-      .filter((r: any) => r && r.itemId !== null && r.score !== null)
-      .map((r: any) => ({ itemId: r.itemId, score: r.score }));
-
-    const filteredComments = comments
-      .filter((c: any) => c && c.itemId !== null && c.text !== null)
-      .map((c: any) => ({ itemId: c.itemId, text: c.text }));
-
-    const parsedInspection: InspectionWithRelations = {
-      ...baseInspection,
-      ratings: filteredRatings,
-      comments: filteredComments,
+      ratings,
+      comments,
     };
 
     return NextResponse.json({ 
@@ -175,8 +196,9 @@ export async function POST(request: NextRequest) {
     });
   } catch (error) {
     console.error('Error saving inspection:', error);
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
     return NextResponse.json(
-      { success: false, error: 'Failed to save inspection' },
+      { success: false, error: `Failed to save inspection: ${errorMessage}` },
       { status: 500 }
     );
   }

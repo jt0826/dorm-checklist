@@ -1,76 +1,77 @@
 import Database from 'better-sqlite3';
-import fs from 'fs';
-import path from 'path';
 
-const dbPath = path.join(process.cwd(), 'data');
-const dbFile = path.join(dbPath, 'inspections.db');
+let db: Database.Database | null = null;
 
-if (!fs.existsSync(dbPath)) {
-  fs.mkdirSync(dbPath, { recursive: true });
+export function getDb() {
+  if (!db) {
+    // Use in-memory database for serverless
+    db = new Database(':memory:');
+    
+    // Initialize tables
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS inspections (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        location_id INTEGER NOT NULL,
+        room_number INTEGER NOT NULL,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      );
+      
+      CREATE TABLE IF NOT EXISTS ratings (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        inspection_id INTEGER,
+        item_id INTEGER NOT NULL,
+        score INTEGER NOT NULL,
+        FOREIGN KEY(inspection_id) REFERENCES inspections(id) ON DELETE CASCADE
+      );
+      
+      CREATE TABLE IF NOT EXISTS comments (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        inspection_id INTEGER,
+        item_id INTEGER NOT NULL,
+        text TEXT NOT NULL,
+        FOREIGN KEY(inspection_id) REFERENCES inspections(id) ON DELETE CASCADE
+      );
+    `);
+    
+    // Add some sample data for testing
+    const inspectionCount = db.prepare('SELECT COUNT(*) as count FROM inspections').get() as { count: number };
+    if (inspectionCount.count === 0) {
+      const sampleInspection = db.prepare(`
+        INSERT INTO inspections (location_id, room_number) 
+        VALUES (1, 101)
+      `).run();
+      
+      const inspectionId = sampleInspection.lastInsertRowid as number;
+      
+      db.prepare(`
+        INSERT INTO ratings (inspection_id, item_id, score) 
+        VALUES (?, 1, 8), (?, 2, 7), (?, 3, 9)
+      `).run(inspectionId, inspectionId, inspectionId);
+      
+      db.prepare(`
+        INSERT INTO comments (inspection_id, item_id, text) 
+        VALUES (?, 1, 'Very clean'), (?, 2, 'Good condition'), (?, 3, 'Working properly')
+      `).run(inspectionId, inspectionId, inspectionId);
+    }
+  }
+  return db;
 }
 
-const db = new Database(dbFile);
-
-// Database row interfaces
-interface InspectionRow {
+// Type definitions
+export interface InspectionRow {
   id: number;
   location_id: number;
   room_number: number;
   created_at: string;
-  updated_at: string;
-  ratings: string; // JSON string from database
-  comments: string; // JSON string from database
+  ratings: string;
+  comments: string;
 }
 
-interface RatingRow {
-  itemId: number;
-  score: number;
-}
-
-interface CommentRow {
-  itemId: number;
-  text: string;
-}
-
-interface InspectionWithRelations {
+export interface ParsedInspection {
   id: number;
   location_id: number;
   room_number: number;
   created_at: string;
-  updated_at: string;
-  ratings: RatingRow[];
-  comments: CommentRow[];
+  ratings: { itemId: number; score: number }[];
+  comments: { itemId: number; text: string }[];
 }
-
-function initDatabase() {
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS inspections (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      location_id INTEGER NOT NULL,
-      room_number INTEGER NOT NULL,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    );
-    
-    CREATE TABLE IF NOT EXISTS ratings (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      inspection_id INTEGER,
-      item_id INTEGER NOT NULL,
-      score INTEGER NOT NULL,
-      FOREIGN KEY(inspection_id) REFERENCES inspections(id) ON DELETE CASCADE
-    );
-    
-    CREATE TABLE IF NOT EXISTS comments (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      inspection_id INTEGER,
-      item_id INTEGER NOT NULL,
-      text TEXT NOT NULL,
-      FOREIGN KEY(inspection_id) REFERENCES inspections(id) ON DELETE CASCADE
-    );
-  `);
-}
-
-initDatabase();
-
-export default db;
-export type { InspectionRow, InspectionWithRelations, RatingRow, CommentRow };
